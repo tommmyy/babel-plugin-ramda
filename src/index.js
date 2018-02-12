@@ -1,9 +1,14 @@
 import resolveModule from './modules';
 
 const SPECIAL_TYPES = ['isMemberExpression', 'isProperty'];
+const LIBS = ['ramda', 'ramda-extension'];
 
 function isSpecialTypes(t, node) {
     return SPECIAL_TYPES.filter(type => t[type](node)).length > 0;
+}
+
+function includesRamdaLib(x) {
+  return LIBS.includes(x);
 }
 
 export default function({ types: t }) {
@@ -11,27 +16,39 @@ export default function({ types: t }) {
   // these in the `Program` visitor in order to support running the
   // plugin in watch mode or on multiple files.
   let ramdas,
+      ramdaExts,
       specified,
       selectedMethods;
 
   // Import a ramda method and return the computed import identifier
-  function importMethod(methodName, file) {
-    if (!selectedMethods[methodName]) {
-      let path = resolveModule(methodName);
-      selectedMethods[methodName] = file.addImport(path, 'default');
+  function importMethod(lib, methodName, file) {
+    if (!selectedMethods[lib]) {
+      selectedMethods[lib] = Object.create(null);
     }
-    return t.clone(selectedMethods[methodName]);
+
+    if (!selectedMethods[lib][methodName]) {
+      let path = resolveModule(lib, methodName);
+      selectedMethods[lib][methodName] = file.addImport(path, 'default');
+    }
+    return t.clone(selectedMethods[lib][methodName]);
   }
 
-  function matchesRamda(path, name) {
-    return ramdas[name] && (
+  function matchesRamdaLib(lib, path, name) {
+    if (!ramdas[lib]) {
+      ramdas[lib] = Object.create(null);
+    }
+
+    return ramdas[lib][name] && (
       hasBindingOfType(path.scope, name, 'ImportDefaultSpecifier') ||
       hasBindingOfType(path.scope, name, 'ImportNamespaceSpecifier')
     );
   }
 
-  function matchesRamdaMethod(path, name) {
-    return specified[name] && hasBindingOfType(path.scope, name, 'ImportSpecifier');
+  function matchesRamdaLibMethod(lib, path, name) {
+    if (!specified[lib]) {
+      specified[lib] = Object.create(null);
+    }
+    return specified[lib][name] && hasBindingOfType(path.scope, name, 'ImportSpecifier');
   }
 
   function hasBindingOfType(scope, name, type) {
@@ -44,6 +61,7 @@ export default function({ types: t }) {
         enter() {
           // Track the variables used to import ramda
           ramdas = Object.create(null);
+
           specified = Object.create(null);
           // Track the methods that have already been used to prevent dupe imports
           selectedMethods = Object.create(null);
@@ -51,12 +69,14 @@ export default function({ types: t }) {
       },
       ImportDeclaration(path) {
         let { node } = path;
-        if (node.source.value === 'ramda') {
+        const lib = node.source.value;
+
+        if (includesRamdaLib(node.source.value)) {
           node.specifiers.forEach(spec => {
             if (t.isImportSpecifier(spec)) {
-              specified[spec.local.name] = spec.imported.name;
+              specified[lib][spec.local.name] = spec.imported.name;
             } else {
-              ramdas[spec.local.name] = true;
+              ramdas[lib][spec.local.name] = true;
             }
           });
           path.remove();
@@ -64,9 +84,12 @@ export default function({ types: t }) {
       },
       ExportNamedDeclaration(path) {
         let { node, hub } = path;
-        if (node.source && node.source.value === 'ramda') {
+
+        if (node.source && includesRamdaLib(node.source.value)) {
+          const lib = node.source.value;
+
           let specifiers = node.specifiers.map(spec => {
-            let importIdentifier = importMethod(spec.exported.name, hub.file);
+            let importIdentifier = importMethod(lib, spec.exported.name, hub.file);
             let exportIdentifier = t.identifier(spec.local.name);
             return t.exportSpecifier(importIdentifier, exportIdentifier);
           });
@@ -76,15 +99,16 @@ export default function({ types: t }) {
       },
       ExportAllDeclaration(path) {
         let { node } = path;
-        if (node.source && node.source.value === 'ramda') {
-          throw new Error('`export * from "ramda"` defeats the purpose of babel-plugin-ramda');
+        if (node.source && includesRamdaLib(node.source.value)) {
+          throw new Error(`'export * from "${node.source.value}"' defeats the purpose of babel-plugin-ramda-extension`);
         }
       },
       CallExpression(path) {
         let { node, hub } = path;
         let { name } = node.callee;
+
         if (!t.isIdentifier(node.callee)) return;
-        if (matchesRamdaMethod(path, name)) {
+        if (matchesRamdaLib(path, name)) {
           node.callee = importMethod(specified[name], hub.file);
         }
         if (node.arguments) {
